@@ -3,6 +3,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 #include <Adafruit_SGP30.h>
+#include <SensirionI2cScd4x.h>
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -11,14 +12,24 @@
 Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 const char* ssid = "GULDAN-R";
-const char* password = "SlozhniyParol1";
+const char* password = "123";
 
 IPAddress local_IP(192, 168, 178, 73);  
 IPAddress gateway(192, 168, 178, 1);    
 IPAddress subnet(255, 255, 255, 0);   
 IPAddress dns(192, 168, 178, 1);        
 
+unsigned long lastSensorRead = 0;
+#define SENSOR_READ_TIMEOUT 10000
+
 Adafruit_SGP30 sgp;
+bool sgp30_ok;
+uint16_t sgp30_co2, sgp30_tvoc;
+
+SensirionI2cScd4x scd4x;
+bool scd41_ok;
+uint16_t scd41_co2;
+float scd41_temperature, scd41_humidity;
 
 WiFiServer server(80);
 
@@ -49,6 +60,19 @@ void setup() {
   displayText("SGP30 sensor initialized!", 1, 0, 0);
   delay(300);
 
+  scd4x.begin(Wire, SCD41_I2C_ADDR_62);
+  scd4x.stopPeriodicMeasurement();
+  uint16_t error;
+  char errorMessage[256];
+  error = scd4x.startPeriodicMeasurement();
+  if (error) {
+    Serial.println("Error SCD41 init: " + String(error));
+    displayText("Error SCD41 init: " + String(error), 1, 0, 0);
+  }
+  Serial.println("SCD41 sensor initialized!");
+  displayText("SCD41 sensor initialized!", 1, 0, 0);
+  delay(300);
+
   server.begin();
   Serial.println("✅ Web server started");
   displayText("Web server started", 1, 0, 0);
@@ -61,17 +85,34 @@ void loop() {
     displayText("Lost Wi-Fi connection!", 1, 0, 0);
   }
 
-  uint16_t co2, tvoc;
-  if (readCO2(co2, tvoc)) {
-      Serial.println("eCO2: " + String(co2) + " ppm\tTVOC: " + String(tvoc) + " ppb");
-      displayText("eCO2: " + String(co2) + "\nTVOC: " + String(tvoc) + "", 2, 0, 0);
-  } else {
-    Serial.println("❌ Failed to read SGP30");
-    displayText("Failed to read SGP30", 1, 0, 0);
+
+  if (lastSensorRead + SENSOR_READ_TIMEOUT < millis()) {
+    lastSensorRead = millis();
+    String text = "";
+
+    if (readSCD41(scd41_co2, scd41_temperature, scd41_humidity)) {
+      Serial.println("CO2:  " + String(scd41_co2) + " ppm\tTemperature: " + String(scd41_temperature) + "C\tHumidity: " + String(scd41_humidity) + "%");
+      text += "CO2: " + String(scd41_co2) + " ppm\nTemp: " + String(scd41_temperature) + "C\nHum:  " + String(scd41_humidity) + "%\n\n";
+    } else {
+      Serial.println("❌ Failed to read SCD41");
+      displayText("Failed to read SCD41", 1, 0, 0);
+      delay(1000);
+    }
+
+    if (readCO2(sgp30_co2, sgp30_tvoc)) {
+        Serial.println("eCO2: " + String(sgp30_co2) + " ppm\tTVOC: " + String(sgp30_tvoc) + " ppb");
+        text += "eCO2: " + String(sgp30_co2) + " ppm\nTVOC: " + String(sgp30_tvoc) + " ppb";
+    } else {
+      Serial.println("❌ Failed to read SGP30");
+      displayText("Failed to read SGP30", 1, 0, 0);
+      delay(1000);
+    }
+  
+    displayText(text, 0, 0, 0);
   }
 
   webServerWork();
-  delay(1000);
+  delay(100);
 }
 
 void displayText(String text, int size, int left, int top) {
@@ -135,6 +176,19 @@ bool readCO2(uint16_t &eco2, uint16_t &tvoc) {
   }
 }
 
+bool readSCD41(uint16_t &co2, float &temperature, float &humidity) {
+  uint16_t error = scd4x.readMeasurement(co2, temperature, humidity);
+  if (error) {
+    return false;
+  }
+
+  if (co2 == 0) {
+    return false;
+  }
+
+  return true;
+}
+
 void webServerWork() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -145,10 +199,6 @@ void webServerWork() {
   Serial.println("📡 RAW REQUEST: [" + request + "]");  // debug
   
   if (request.startsWith("GET /metrics")) {
-    uint16_t eco2 = 0;
-    uint16_t tvoc = 0;
-    bool co2_ok = readCO2(eco2, tvoc);
-  
     // System metrics
     unsigned long uptime_sec = millis() / 1000;
     uint32_t free_heap = ESP.getFreeHeap();
@@ -156,23 +206,48 @@ void webServerWork() {
   
     String body;
   
-    // === CO₂ и TVOC ===
-    body += "# HELP air_co2_ppm Equivalent CO2 concentration in ppm\n";
-    body += "# TYPE air_co2_ppm gauge\n";
-    body += "air_co2_ppm ";
-    body += String(co2_ok ? eco2 : 0);
+    // === SGP30 CO₂ и TVOC ===
+    body += "# HELP sgp30_co2_ppm Equivalent CO2 concentration from SGP30 in ppm\n";
+    body += "# TYPE sgp30_co2_ppm gauge\n";
+    body += "sgp30_co2_ppm ";
+    body += String(sgp30_ok ? sgp30_co2 : 0);
     body += "\n";
-  
-    body += "# HELP air_tvoc_ppb Total Volatile Organic Compounds in ppb\n";
-    body += "# TYPE air_tvoc_ppb gauge\n";
-    body += "air_tvoc_ppb ";
-    body += String(co2_ok ? tvoc : 0);
+
+    body += "# HELP sgp30_tvoc_ppb Total Volatile Organic Compounds from SGP30 in ppb\n";
+    body += "# TYPE sgp30_tvoc_ppb gauge\n";
+    body += "sgp30_tvoc_ppb ";
+    body += String(sgp30_ok ? sgp30_tvoc : 0);
     body += "\n";
-  
-    body += "# HELP air_sensor_status 1 if last CO2 read was successful, 0 otherwise\n";
-    body += "# TYPE air_sensor_status gauge\n";
-    body += "air_sensor_status ";
-    body += String(co2_ok ? 1 : 0);
+
+    body += "# HELP sgp30_sensor_status 1 if last SGP30 read was successful, 0 otherwise\n";
+    body += "# TYPE sgp30_sensor_status gauge\n";
+    body += "sgp30_sensor_status ";
+    body += String(sgp30_ok ? 1 : 0);
+    body += "\n";
+
+    // === SCD41 CO₂, Temperature, Humidity ===
+    body += "# HELP scd41_co2_ppm CO2 concentration from SCD41 in ppm\n";
+    body += "# TYPE scd41_co2_ppm gauge\n";
+    body += "scd41_co2_ppm ";
+    body += String(scd41_ok ? scd41_co2 : 0);
+    body += "\n";
+
+    body += "# HELP scd41_temperature_celsius Temperature from SCD41 in °C\n";
+    body += "# TYPE scd41_temperature_celsius gauge\n";
+    body += "scd41_temperature_celsius ";
+    body += String(scd41_ok ? scd41_temperature : 0);
+    body += "\n";
+
+    body += "# HELP scd41_humidity_percent Relative humidity from SCD41 in %\n";
+    body += "# TYPE scd41_humidity_percent gauge\n";
+    body += "scd41_humidity_percent ";
+    body += String(scd41_ok ? scd41_humidity : 0);
+    body += "\n";
+
+    body += "# HELP scd41_sensor_status 1 if last SCD41 read was successful, 0 otherwise\n";
+    body += "# TYPE scd41_sensor_status gauge\n";
+    body += "scd41_sensor_status ";
+    body += String(scd41_ok ? 1 : 0);
     body += "\n";
   
     // === ESP8266 ===
