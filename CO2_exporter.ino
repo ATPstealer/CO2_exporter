@@ -91,18 +91,23 @@ void loop() {
     String text = "";
 
     if (readSCD41(scd41_co2, scd41_temperature, scd41_humidity)) {
+      scd41_ok = 1;
       Serial.println("CO2:  " + String(scd41_co2) + " ppm\tTemperature: " + String(scd41_temperature) + "C\tHumidity: " + String(scd41_humidity) + "%");
       text += "CO2: " + String(scd41_co2) + " ppm\nTemp: " + String(scd41_temperature) + "C\nHum:  " + String(scd41_humidity) + "%\n\n";
+
     } else {
+      scd41_ok = 0;
       Serial.println("❌ Failed to read SCD41");
       displayText("Failed to read SCD41", 1, 0, 0);
       delay(1000);
     }
 
     if (readCO2(sgp30_co2, sgp30_tvoc)) {
-        Serial.println("eCO2: " + String(sgp30_co2) + " ppm\tTVOC: " + String(sgp30_tvoc) + " ppb");
-        text += "eCO2: " + String(sgp30_co2) + " ppm\nTVOC: " + String(sgp30_tvoc) + " ppb";
+      sgp30_ok = 1;
+      Serial.println("eCO2: " + String(sgp30_co2) + " ppm\tTVOC: " + String(sgp30_tvoc) + " ppb");
+      text += "eCO2: " + String(sgp30_co2) + " ppm\nTVOC: " + String(sgp30_tvoc) + " ppb";
     } else {
+      sgp30_ok = 0;
       Serial.println("❌ Failed to read SGP30");
       displayText("Failed to read SGP30", 1, 0, 0);
       delay(1000);
